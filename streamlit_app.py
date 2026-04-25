@@ -220,4 +220,142 @@ def generate_schedule(DAY_OF_WEEK, LEAVES, CUSTOM_TASKS, PART_TIME, FIX_BREAKS):
     for p in ft_pharmacists:
         for t in range(16): reward_vars.append(x[p, t, 'ว่าง'] * -5000)
 
-    model.Maximize(sum(reward_v
+    model.Maximize(sum(reward_vars))
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 120.0 
+
+    status = solver.Solve(model)
+
+    if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
+        schedule_data = []
+        for p in all_pharmacists:
+            row_data = {'ชื่อเภสัชกร': p}
+            for t in range(16):
+                for task in tasks:
+                    if solver.Value(x[p, t, task]) == 1:
+                        if task == 'งานเฉพาะ': display_task = custom_dict_index.get((p, t), 'งานเฉพาะ')
+                        elif task in ['นอกเวลา', 'ว่าง']: display_task = '-'
+                        elif task == 'Match_C': display_task = 'Match + C'
+                        elif task == 'Matching': display_task = 'Matching'
+                        elif task == 'Ver_1': display_task = 'Ver 1 INC'
+                        elif task == 'Ver_2': display_task = 'Ver 2/ปณ.'
+                        elif task == 'Ver_3': display_task = 'Ver 3/A'
+                        elif task.startswith('PS_'): display_task = 'Ver ' + task.replace('_', '')
+                        else: display_task = task.replace('_', ' ')
+                        row_data[time_slots[t]] = display_task
+            schedule_data.append(row_data)
+        return pd.DataFrame(schedule_data), "Success"
+    else:
+        return None, "Infeasible"
+
+
+# ==========================================
+# 🖥️ ส่วนที่ 2: สร้างหน้าเว็บ UI ด้วย Streamlit
+# ==========================================
+st.set_page_config(page_title="Pharmacy Schedule App", layout="wide", page_icon="💊")
+
+st.title("💊 โปรแกรมจัดตารางเภสัชกรห้องยาอัจฉริยะ")
+st.markdown("ระบบ AI จัดตารางเวรให้สมดุลอัตโนมัติ กรุณาตั้งค่าทางเมนูด้านซ้าย และกดปุ่มสร้างตารางด้านล่าง")
+
+ft_pharmacists_list = ['เต้น', 'แอน', 'แม็ค', 'โบ้ท', 'ไม้เอก', 'กิ๊ฟ', 'ฟอร์จูน', 'มิ้ลค์', 'ริน', 
+                      'อ๊อฟฟี่', 'ออย', 'บี', 'มายด์', 'ขิม', 'บีม', 'มิ้น', 'ใบเตย', 'จีน่า', 'ปอนด์']
+dropdown_names = ["ไม่มี"] + ft_pharmacists_list
+
+# เก็บค่าตัวแปรจาก Sidebar
+leaves_input = {}
+pt_input = []
+custom_tasks_input = {}
+fix_breaks_input = {}
+DAY_OF_WEEK = 'Normal'
+
+with st.sidebar:
+    st.header("⚙️ ตั้งค่าตารางประจำวัน")
+    
+    # 1. ประเภทวัน
+    day_type = st.radio("📅 เลือกประเภทวัน", ["ปกติ (จ,อ,พฤ)", "พุธ หรือ ศุกร์ (ปรับเวลาพัก)"])
+    DAY_OF_WEEK = 'Wed_Fri' if day_type == "พุธ หรือ ศุกร์ (ปรับเวลาพัก)" else 'Normal'
+    st.divider()
+    
+    # 2. คนลา
+    st.subheader("🏖️ ผู้ที่ลาในวันนี้ (สูงสุด 4 คน)")
+    for i in range(4):
+        c1, c2 = st.columns([3, 2])
+        with c1: p_leave = st.selectbox(f"คนที่ {i+1}", dropdown_names, key=f"l_name_{i}")
+        with c2: t_leave = st.selectbox("ประเภท", ["ทั้งวัน", "เช้า", "บ่าย"], key=f"l_type_{i}")
+        if p_leave != "ไม่มี": leaves_input[p_leave] = t_leave
+
+    st.divider()
+
+    # 3. Part-time
+    st.subheader("🧑‍⚕️ เภสัชกร Part-time (สูงสุด 3 คน)")
+    for i in range(3):
+        with st.expander(f"Part-time คนที่ {i+1}"):
+            pt_name = st.text_input("ชื่อ PT", key=f"pt_n_{i}")
+            c1, c2 = st.columns(2)
+            with c1: pt_s = st.selectbox("เริ่ม", VALID_TIMES, index=0, key=f"pt_s_{i}")
+            with c2: pt_e = st.selectbox("สิ้นสุด", VALID_TIMES, index=16, key=f"pt_e_{i}")
+            pt_b = st.checkbox("จัดพัก 12.30-13.00", value=True, key=f"pt_b_{i}")
+            
+            if pt_name.strip() != "":
+                if VALID_TIMES.index(pt_s) < VALID_TIMES.index(pt_e):
+                    pt_input.append({'name': pt_name, 'start': pt_s, 'end': pt_e, 'has_break': pt_b})
+                else:
+                    st.error("เวลาผิดพลาด")
+
+    st.divider()
+
+    # 4. งานเฉพาะราย
+    st.subheader("📋 ภารกิจพิเศษ / งานเฉพาะราย (สูงสุด 20 งาน)")
+    st.caption("เว้นว่างไว้หากไม่มีภารกิจ")
+    for i in range(20):
+        with st.expander(f"งานที่ {i+1}"):
+            p_task = st.selectbox(f"ชื่อคน", dropdown_names, key=f"t_name_{i}")
+            n_task = st.text_input(f"ชื่องาน", key=f"t_n_{i}")
+            c1, c2 = st.columns(2)
+            with c1: s_task = st.selectbox(f"เริ่ม", VALID_TIMES, index=0, key=f"t_s_{i}")
+            with c2: e_task = st.selectbox(f"สิ้นสุด", VALID_TIMES, index=2, key=f"t_e_{i}")
+            
+            if p_task != "ไม่มี" and n_task.strip() != "":
+                if VALID_TIMES.index(s_task) < VALID_TIMES.index(e_task):
+                    custom_tasks_input[(p_task, s_task, e_task)] = n_task.strip()
+
+    st.divider()
+
+    # 5. Fix พัก
+    st.subheader("🍱 ล็อกเวลาพักเฉพาะบุคคล (สูงสุด 5 คน)")
+    break_choices = ["รอบที่ 1 (11.00 หรือ 11.30)", "รอบที่ 2 (12.00 หรือ 12.30)", "รอบที่ 3 (13.00 หรือ 13.30)"]
+    for i in range(5):
+        c1, c2 = st.columns([2, 3])
+        with c1: p_b = st.selectbox(f"คนที่ {i+1}", dropdown_names, key=f"b_name_{i}")
+        with c2: t_b = st.selectbox("รอบพัก", break_choices, key=f"b_time_{i}")
+        if p_b != "ไม่มี":
+            if "รอบที่ 1" in t_b: fix_breaks_input[p_b] = 0
+            elif "รอบที่ 2" in t_b: fix_breaks_input[p_b] = 1
+            elif "รอบที่ 3" in t_b: fix_breaks_input[p_b] = 2
+
+# ปุ่มรันระบบ (Main Area)
+st.divider()
+if st.button("🚀 สร้างตารางปฏิบัติงาน (คลิก)", type="primary", use_container_width=True):
+    with st.spinner('🤖 AI กำลังประมวลผลความเป็นไปได้นับล้านรูปแบบ... โปรดรอ 1-2 นาที'):
+        try:
+            df_result, status = generate_schedule(DAY_OF_WEEK, leaves_input, custom_tasks_input, pt_input, fix_breaks_input)
+            
+            if status == "Success":
+                st.success("🎉 สร้างตารางเสร็จสมบูรณ์!")
+                st.dataframe(df_result, use_container_width=True)
+                
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                    df_result.to_excel(writer, index=False, sheet_name='Schedule')
+                
+                st.download_button(
+                    label="📥 ดาวน์โหลดตารางเป็นไฟล์ Excel",
+                    data=buffer.getvalue(),
+                    file_name="Pharmacy_Schedule_App.xlsx",
+                    mime="application/vnd.ms-excel",
+                    use_container_width=True
+                )
+            else:
+                st.error("⚠️ Infeasible: ไม่สามารถจัดตารางได้! (คนไม่พอ, ช่วงเวลางานพิเศษชนกัน หรือล็อกเวลาพักซ้อนกันมากไป) ลองลดเงื่อนไขทางด้านซ้ายลงครับ")
+        except Exception as e:
+            st.error(f"❌ เกิดข้อผิดพลาดในระบบ: {str(e)}")
